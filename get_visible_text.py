@@ -1,103 +1,77 @@
 #!/usr/bin/env python3
 """
-get_visible_text.py – Extracts only the human‑visible text from any web page.
+get_visible_text.py – Extract only the human‑visible text from any web page (no alt‑text, no <title>, no inline attributes).
 
-Usage (CLI):
-    python get_visible_text.py https://example.com           # prints to stdout
-    python get_visible_text.py https://example.com -o page.txt
+Usage from the command line
+---------------------------
+python get_visible_text.py https://example.com              # prints to stdout
+python get_visible_text.py https://example.com -o page.txt  # writes to file
 
-Features
---------
-* **Skips** all <script>, <style>, <noscript>, <img>, <svg>, <iframe>, <head>, and <title> elements,
-  so no alt‑text, title attributes, or other non‑visible metadata are captured.
-* Collapses consecutive whitespace and converts <br> / <p> boundaries into newlines for legibility.
-* Requires only three well‑known libraries: `requests`, `beautifulsoup4`, `lxml`.
-
-Install deps once with:
-    pip install -r requirements.txt
-
-requirements.txt
------------------
-requests>=2.31
-beautifulsoup4>=4.12
-lxml>=5.2
-
+The file also exposes a single helper function:
+    visible_text(url: str, timeout: int = 20) -> str
+which you can import elsewhere (e.g. from Streamlit).
 """
+
+from __future__ import annotations
+
 import argparse
+import pathlib
 import re
 import sys
-from pathlib import Path
+from typing import Final
 
 import requests
 from bs4 import BeautifulSoup
 
+USER_AGENT: Final = "Mozilla/5.0 (compatible; CleanTextBot/1.0; +https://github.com/Mjeezuz/clean-text-extractor)"
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
-def _visible_text(html: str) -> str:
-    """Return the visible text from *html*, minus scripts/images/styles etc."""
-    soup = BeautifulSoup(html, "lxml")
+def visible_text(url: str, timeout: int = 20) -> str:
+    """Return only the human‑visible text at *url*.
 
-    # Remove tags that never show visible text
-    for tag in soup([
-        "script",
-        "style",
-        "noscript",
-        "img",
-        "svg",
-        "iframe",
-        "head",
-        "title",
-    ]):
+    The function:
+    * Downloads *url* using :pyfunc:`requests.get` with a desktop User‑Agent.
+    * Parses HTML via **lxml** + **BeautifulSoup4**.
+    * Removes all tags that should never be seen by users: ``<script>``, ``<style>``,
+      ``<noscript>``, ``<img>``, ``<svg>``, ``<iframe>``, ``<head>``, and ``<title>``.
+    * Collapses whitespace so the result is a single paragraph‑style block suitable for NLP.
+    """
+    response = requests.get(url, timeout=timeout, headers={"User-Agent": USER_AGENT})
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "lxml")
+
+    # drop non‑visible elements entirely
+    for tag in soup(["script", "style", "noscript", "img", "svg", "iframe", "head", "title"]):
         tag.decompose()
 
-    # Convert <br> and paragraph ends into newlines to keep structure
-    for br in soup.find_all("br"):
-        br.replace_with("\n")
-    for p in soup.find_all("p"):
-        p.append("\n")
-
-    # Join visible strings, strip each piece, then collapse whitespace
-    text = " ".join(s.strip() for s in soup.stripped_strings)
-
-    # Normalize: collapse spaces around newlines, and 2+ spaces to 1 space
-    text = re.sub(r"\s*\n\s*", "\n", text)
-    text = re.sub(r" {2,}", " ", text)
-    return text.strip()
+    # gather remaining text fragments, strip whitespace, and join
+    text = " ".join(fragment.strip() for fragment in soup.stripped_strings)
+    # normalise internal whitespace to single spaces
+    return re.sub(r"\s+", " ", text).strip()
 
 
 # ---------------------------------------------------------------------------
-# CLI entry‑point
+# Command‑line interface
 # ---------------------------------------------------------------------------
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(
-        description="Fetch a web page and output only its visible text.",
-    )
-    parser.add_argument("url", help="URL of the page to scrape")
-    parser.add_argument(
-        "-o",
-        "--output",
-        type=Path,
-        help="Write the extracted text to this file instead of stdout",
-    )
-    args = parser.parse_args(argv)
 
-    try:
-        resp = requests.get(args.url, timeout=20)
-        resp.raise_for_status()
-    except requests.RequestException as exc:
-        parser.error(f"Failed to fetch {args.url}: {exc}")
+def _cli() -> None:  # pragma: no cover  (simple CLI wrapper, not unit‑tested)
+    parser = argparse.ArgumentParser(description="Extract visible text from a web page.")
+    parser.add_argument("url", help="Web page URL to fetch")
+    parser.add_argument("-o", "--output", metavar="FILE", help="Write result to FILE instead of stdout")
+    parser.add_argument("-t", "--timeout", type=int, default=20, help="HTTP timeout in seconds (default: 20)")
+    args = parser.parse_args()
 
-    text = _visible_text(resp.text)
+    text = visible_text(args.url, timeout=args.timeout)
 
     if args.output:
-        args.output.write_text(text, encoding="utf‑8")
+        path = pathlib.Path(args.output)
+        path.write_text(text, encoding="utf-8")
+        print(f"✔ Saved to {path.resolve()}", file=sys.stderr)
     else:
         print(text)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _cli()
