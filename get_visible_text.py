@@ -1,26 +1,16 @@
 #!/usr/bin/env python3
 """
-get_visible_text.py – Extract human‑visible text **with layout cues for LLMs**
+get_visible_text.py – Extract human‑visible text **with semantic cues for LLMs**
 
-▲ New in this version
----------------------
-* **Headings (h1–h4)** are wrapped in *double* blank lines so block boundaries are obvious.
-* **Bulleted lists** stay compact (single newline between each "- item").
-* **Links** are prefixed with a hash symbol (e.g. "#Read more") so that downstream GPT pipelines can recognise anchor text.
-* Runs of 3+ blank lines are collapsed to exactly two, ensuring consistent paragraph spacing.
-
-Command‑line usage
+🔄 What’s new (v4)
 ------------------
-```bash
-python get_visible_text.py https://example.com              # prints formatted text
-python get_visible_text.py https://example.com -o page.txt  # writes to file
-```
+* **Headings h1‑h4** are now emitted as `**[H{n}] text**` and still wrapped in *double* blank lines.
+  Example: `\n\n**[H2] Features**\n\n`
+* Extraction is confined to the document’s `<main>` element if present, ignoring sidebars, nav, ads, etc.
+* `<footer>` is discarded entirely, even when inside `<main>`.
+* All earlier behaviour remains: compact bullet lists, `#` prefix for links, collapsing ≥3 blank lines to two.
 
-The helper function
-```
-visible_text(url: str, timeout: int = 20) -> str
-```
-returns a lightly‑formatted string ready for copy/paste or further NLP.
+Command‑line usage remains unchanged.
 """
 
 from __future__ import annotations
@@ -35,7 +25,7 @@ import requests
 from bs4 import BeautifulSoup
 
 USER_AGENT: Final = (
-    "Mozilla/5.0 (compatible; CleanTextBot/3.0; +https://github.com/Mjeezuz/clean-text-extractor)"
+    "Mozilla/5.0 (compatible; CleanTextBot/4.0; +https://github.com/Mjeezuz/clean-text-extractor)"
 )
 
 
@@ -44,30 +34,38 @@ USER_AGENT: Final = (
 # ---------------------------------------------------------------------------
 
 def visible_text(url: str, timeout: int = 20) -> str:
-    """Return only the human‑visible text at *url* with basic formatting.
+    """Return only the human‑visible text at *url* with helpful layout cues.
 
-    Steps
-    -----
-    1. Fetch *url* with a desktop User‑Agent.
-    2. Parse HTML using **lxml** + **BeautifulSoup4**.
-    3. **Remove** elements never displayed: ``script``, ``style``, ``noscript``,
-       ``img``, ``svg``, ``iframe``, ``head``, ``title``.
-    4. Convert headings (h1‑h4) → double‑spaced blocks.
-    5. Convert list items → Markdown bullets ("- ").
-    6. Prefix anchor text with "#" to mark links.
-    7. Replace ``<br>`` tags with explicit line breaks.
-    8. Extract text with ``separator="\n"``.
-    9. Collapse excess internal whitespace; keep max two blank lines.
+    Steps (high‑level)
+    ------------------
+    1. Fetch URL with a desktop User‑Agent.
+    2. Parse HTML via **lxml** + **BeautifulSoup4**.
+    3. Focus on `<main>` if it exists; otherwise use `<body>`.
+    4. Remove elements never rendered (script, style, img, head, footer…).
+    5. Mark up headings as `**[Hn] text**` surrounded by blank lines.
+    6. Convert list items to Markdown bullets.
+    7. Prefix anchor text with `#`.
+    8. Replace `<br>` with explicit newlines.
+    9. Extract text and normalise whitespace.
     """
 
     # --- 1. download --------------------------------------------------------
-    response = requests.get(url, timeout=timeout, headers={"User-Agent": USER_AGENT})
-    response.raise_for_status()
+    resp = requests.get(url, timeout=timeout, headers={"User-Agent": USER_AGENT})
+    resp.raise_for_status()
 
     # --- 2. parse -----------------------------------------------------------
-    soup = BeautifulSoup(response.text, "lxml")
+    soup_full = BeautifulSoup(resp.text, "lxml")
 
-    # --- 3. strip non‑visible elements -------------------------------------
+    # --- 3. scope to <main> -------------------------------------------------
+    main = soup_full.find("main") or soup_full.body or soup_full
+    # Work on a *copy* of this subtree to avoid side‑effects on soup_full
+    soup = BeautifulSoup(str(main), "lxml")
+
+    # Always discard footer even if inside main
+    for ft in soup.find_all("footer"):
+        ft.decompose()
+
+    # --- 4. strip non‑visible elements -------------------------------------
     for tag in soup(
         [
             "script",
@@ -82,68 +80,58 @@ def visible_text(url: str, timeout: int = 20) -> str:
     ):
         tag.decompose()
 
-    # --- 4. headings (h1‑h4) ----------------------------------------------
-    for h in soup.find_all(re.compile("^h[1-4]$")):
-        text_h = h.get_text(" ", strip=True)
-        h.clear()
-        # Wrap with blank lines before & after
-        h.append(f"\n\n{text_h}\n\n")
+    # --- 5. headings (h1‑h4) ----------------------------------------------
+    for level in range(1, 5):
+        for h in soup.find_all(f"h{level}"):
+            text_h = h.get_text(" ", strip=True)
+            tag = f"[H{level}]"
+            h.clear()
+            h.append(f"\n\n**{tag} {text_h}**\n\n")
 
-    # --- 5. bullet lists ----------------------------------------------------
+    # --- 6. bullet lists ----------------------------------------------------
     for li in soup.find_all("li"):
-        text_li = li.get_text(" ", strip=True)
+        li_text = li.get_text(" ", strip=True)
         li.clear()
-        li.append(f"- {text_li}")
+        li.append(f"- {li_text}")
 
-    # --- 6. mark links ------------------------------------------------------
+    # --- 7. mark links ------------------------------------------------------
     for a in soup.find_all("a"):
-        text_a = a.get_text(" ", strip=True)
+        a_text = a.get_text(" ", strip=True)
         a.clear()
-        a.append(f"#{text_a}")
+        a.append(f"#{a_text}")
 
-    # --- 7. explicit <br> handling -----------------------------------------
+    # --- 8. explicit <br> handling -----------------------------------------
     for br in soup.find_all("br"):
         br.replace_with("\n")
 
-    # --- 8. gather text -----------------------------------------------------
-    raw_text = soup.get_text(separator="\n")
+    # --- 9. gather & clean --------------------------------------------------
+    raw = soup.get_text(separator="\n")
 
-    # --- 9. normalise -------------------------------------------------------
-    # Collapse runs of whitespace inside lines but *keep* newlines we inserted.
-    lines = [re.sub(r"\s+", " ", line).rstrip() for line in raw_text.splitlines()]
-    text_with_lines = "\n".join(lines)
-
-    # Reduce triples or more blank lines to exactly two.
-    cleaned = re.sub(r"\n{3,}", "\n\n", text_with_lines).strip()
+    lines = [re.sub(r"\s+", " ", ln).rstrip() for ln in raw.splitlines()]
+    joined = "\n".join(lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", joined).strip()
 
     return cleaned
 
 
 # ---------------------------------------------------------------------------
-# Command‑line interface
+# CLI helper
 # ---------------------------------------------------------------------------
 
-def _cli() -> None:  # pragma: no cover (simple CLI wrapper)
-    parser = argparse.ArgumentParser(
-        description="Extract visible text from a web page with helpful spacing."
-    )
-    parser.add_argument("url", help="Web page URL to fetch")
-    parser.add_argument(
-        "-o", "--output", metavar="FILE", help="Write result to FILE instead of stdout"
-    )
-    parser.add_argument(
-        "-t", "--timeout", type=int, default=20, help="HTTP timeout in seconds (default: 20)"
-    )
-    args = parser.parse_args()
+def _cli() -> None:  # pragma: no cover
+    p = argparse.ArgumentParser(description="Extract visible text with layout cues.")
+    p.add_argument("url", help="Web page URL to fetch")
+    p.add_argument("-o", "--output", metavar="FILE", help="Write to FILE instead of stdout")
+    p.add_argument("-t", "--timeout", type=int, default=20, help="HTTP timeout seconds")
+    args = p.parse_args()
 
-    text = visible_text(args.url, timeout=args.timeout)
-
+    txt = visible_text(args.url, timeout=args.timeout)
     if args.output:
         path = pathlib.Path(args.output)
-        path.write_text(text, encoding="utf-8")
+        path.write_text(txt, encoding="utf-8")
         print(f"✔ Saved to {path.resolve()}", file=sys.stderr)
     else:
-        print(text)
+        print(txt)
 
 
 if __name__ == "__main__":
