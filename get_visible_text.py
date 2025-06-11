@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-get_visible_text.py – Extract human‑visible text **with semantic cues for LLMs**
+get_visible_text.py – Extract human‑visible text **with rich structural cues for LLMs**
 
-🔄 What’s new (v4)
-------------------
-* **Headings h1‑h4** are now emitted as `**[H{n}] text**` and still wrapped in *double* blank lines.
-  Example: `\n\n**[H2] Features**\n\n`
-* Extraction is confined to the document’s `<main>` element if present, ignoring sidebars, nav, ads, etc.
-* `<footer>` is discarded entirely, even when inside `<main>`.
-* All earlier behaviour remains: compact bullet lists, `#` prefix for links, collapsing ≥3 blank lines to two.
+v5 – 2025‑06‑11
+---------------
+* **Headings (h1‑h4)** now reliably come out as `**[Hn] text**` with *double blank lines* before & after – previous whitespace‑collapsing bug fixed.
+* Explicitly **drops <header> and <footer>** elements no matter where they appear.
+* Still limits extraction to `<main>` if present; otherwise it falls back to `<body>`.
+* All earlier behaviour preserved: compact bullets, `#`‑prefixed links, collapse ≥3 blank lines to exactly two.
 
-Command‑line usage remains unchanged.
+CLI usage unchanged. The module continues to expose **visible_text()** as its single public function.
 """
 
 from __future__ import annotations
@@ -25,94 +24,62 @@ import requests
 from bs4 import BeautifulSoup
 
 USER_AGENT: Final = (
-    "Mozilla/5.0 (compatible; CleanTextBot/4.0; +https://github.com/Mjeezuz/clean-text-extractor)"
+    "Mozilla/5.0 (compatible; CleanTextBot/5.0; +https://github.com/Mjeezuz/clean-text-extractor)"
 )
-
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 def visible_text(url: str, timeout: int = 20) -> str:
-    """Return only the human‑visible text at *url* with helpful layout cues.
+    """Return only the human‑visible text at *url* with helpful layout cues."""
 
-    Steps (high‑level)
-    ------------------
-    1. Fetch URL with a desktop User‑Agent.
-    2. Parse HTML via **lxml** + **BeautifulSoup4**.
-    3. Focus on `<main>` if it exists; otherwise use `<body>`.
-    4. Remove elements never rendered (script, style, img, head, footer…).
-    5. Mark up headings as `**[Hn] text**` surrounded by blank lines.
-    6. Convert list items to Markdown bullets.
-    7. Prefix anchor text with `#`.
-    8. Replace `<br>` with explicit newlines.
-    9. Extract text and normalise whitespace.
-    """
-
-    # --- 1. download --------------------------------------------------------
+    # 1 — fetch -------------------------------------------------------------
     resp = requests.get(url, timeout=timeout, headers={"User-Agent": USER_AGENT})
     resp.raise_for_status()
 
-    # --- 2. parse -----------------------------------------------------------
+    # 2 — parse -------------------------------------------------------------
     soup_full = BeautifulSoup(resp.text, "lxml")
 
-    # --- 3. scope to <main> -------------------------------------------------
+    # 3 — isolate <main> or <body> -----------------------------------------
     main = soup_full.find("main") or soup_full.body or soup_full
-    # Work on a *copy* of this subtree to avoid side‑effects on soup_full
-    soup = BeautifulSoup(str(main), "lxml")
+    soup = BeautifulSoup(str(main), "lxml")  # operate on a copy
 
-    # Always discard footer even if inside main
-    for ft in soup.find_all("footer"):
-        ft.decompose()
-
-    # --- 4. strip non‑visible elements -------------------------------------
-    for tag in soup(
-        [
-            "script",
-            "style",
-            "noscript",
-            "img",
-            "svg",
-            "iframe",
-            "head",
-            "title",
-        ]
-    ):
+    # 4 — drop <header>, <footer>, and non‑visible tags --------------------
+    for tag in soup.find_all(["header", "footer", "script", "style", "noscript", "img", "svg", "iframe", "head", "title"]):
         tag.decompose()
 
-    # --- 5. headings (h1‑h4) ----------------------------------------------
+    # 5 — convert headings --------------------------------------------------
     for level in range(1, 5):
         for h in soup.find_all(f"h{level}"):
             text_h = h.get_text(" ", strip=True)
-            tag = f"[H{level}]"
-            h.clear()
-            h.append(f"\n\n**{tag} {text_h}**\n\n")
+            # Replace the entire element with formatted string (using .replace_with)
+            h.replace_with(f"\n\n**[H{level}] {text_h}**\n\n")
 
-    # --- 6. bullet lists ----------------------------------------------------
+    # 6 — bullet lists ------------------------------------------------------
     for li in soup.find_all("li"):
         li_text = li.get_text(" ", strip=True)
-        li.clear()
-        li.append(f"- {li_text}")
+        li.replace_with(f"- {li_text}\n")
 
-    # --- 7. mark links ------------------------------------------------------
+    # 7 — mark links --------------------------------------------------------
     for a in soup.find_all("a"):
         a_text = a.get_text(" ", strip=True)
-        a.clear()
-        a.append(f"#{a_text}")
+        a.replace_with(f"#{a_text}")
 
-    # --- 8. explicit <br> handling -----------------------------------------
+    # 8 — <BR> to newline ---------------------------------------------------
     for br in soup.find_all("br"):
         br.replace_with("\n")
 
-    # --- 9. gather & clean --------------------------------------------------
+    # 9 — extract, normalise whitespace ------------------------------------
     raw = soup.get_text(separator="\n")
 
+    # compress internal whitespace per line, strip right‑hand side
     lines = [re.sub(r"\s+", " ", ln).rstrip() for ln in raw.splitlines()]
-    joined = "\n".join(lines)
+    joined = "\n".join(ln for ln in lines)
+
+    # collapse ≥3 consecutive blank lines to exactly 2
     cleaned = re.sub(r"\n{3,}", "\n\n", joined).strip()
-
     return cleaned
-
 
 # ---------------------------------------------------------------------------
 # CLI helper
