@@ -2,14 +2,15 @@
 """
 get_visible_text.py – Extract human‑visible text **with rich structural cues for LLMs**
 
-v5 – 2025‑06‑11
+v6 – 2025‑06‑11
 ---------------
-* **Headings (h1‑h4)** now reliably come out as `**[Hn] text**` with *double blank lines* before & after – previous whitespace‑collapsing bug fixed.
-* Explicitly **drops <header> and <footer>** elements no matter where they appear.
-* Still limits extraction to `<main>` if present; otherwise it falls back to `<body>`.
-* All earlier behaviour preserved: compact bullets, `#`‑prefixed links, collapse ≥3 blank lines to exactly two.
+* **Fix:** inline `<strong>/<b>` no longer force unwanted line breaks (we switched to space‑separator extraction and add our own block breaks).
+* Headings (h1‑h4) still bold‑tagged as `**[Hn] ...**` with blank lines before **and** after.
+* Drops `<header>` and `<footer>` globally, plus usual non‑visible tags.
+* Scope is `<main>` if present, otherwise full `<body>`.
+* Bullets stay single‑spaced; links keep the `#anchor` cue.
 
-CLI usage unchanged. The module continues to expose **visible_text()** as its single public function.
+CLI usage unchanged; `visible_text()` is the public API.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import requests
 from bs4 import BeautifulSoup
 
 USER_AGENT: Final = (
-    "Mozilla/5.0 (compatible; CleanTextBot/5.0; +https://github.com/Mjeezuz/clean-text-extractor)"
+    "Mozilla/5.0 (compatible; CleanTextBot/6.0; +https://github.com/Mjeezuz/clean-text-extractor)"
 )
 
 # ---------------------------------------------------------------------------
@@ -32,7 +33,7 @@ USER_AGENT: Final = (
 # ---------------------------------------------------------------------------
 
 def visible_text(url: str, timeout: int = 20) -> str:
-    """Return only the human‑visible text at *url* with helpful layout cues."""
+    """Return only the human‑visible text at *url* with layout cues for LLMs."""
 
     # 1 — fetch -------------------------------------------------------------
     resp = requests.get(url, timeout=timeout, headers={"User-Agent": USER_AGENT})
@@ -45,33 +46,50 @@ def visible_text(url: str, timeout: int = 20) -> str:
     main = soup_full.find("main") or soup_full.body or soup_full
     soup = BeautifulSoup(str(main), "lxml")  # operate on a copy
 
-    # 4 — drop <header>, <footer>, and non‑visible tags --------------------
-    for tag in soup.find_all(["header", "footer", "script", "style", "noscript", "img", "svg", "iframe", "head", "title"]):
+    # 4 — drop unwanted blocks ---------------------------------------------
+    for tag in soup.find_all(
+        [
+            "header",
+            "footer",
+            "script",
+            "style",
+            "noscript",
+            "img",
+            "svg",
+            "iframe",
+            "head",
+            "title",
+        ]
+    ):
         tag.decompose()
 
-    # 5 — convert headings --------------------------------------------------
-    for level in range(1, 5):
-        for h in soup.find_all(f"h{level}"):
-            text_h = h.get_text(" ", strip=True)
-            # Replace the entire element with formatted string (using .replace_with)
-            h.replace_with(f"\n\n**[H{level}] {text_h}**\n\n")
-
-    # 6 — bullet lists ------------------------------------------------------
-    for li in soup.find_all("li"):
-        li_text = li.get_text(" ", strip=True)
-        li.replace_with(f"- {li_text}\n")
-
-    # 7 — mark links --------------------------------------------------------
+    # 5 — mark links --------------------------------------------------------
     for a in soup.find_all("a"):
         a_text = a.get_text(" ", strip=True)
         a.replace_with(f"#{a_text}")
 
-    # 8 — <BR> to newline ---------------------------------------------------
+    # 6 — convert headings --------------------------------------------------
+    for level in range(1, 5):
+        for h in soup.find_all(f"h{level}"):
+            text_h = h.get_text(" ", strip=True)
+            h.replace_with(f"\n\n**[H{level}] {text_h}**\n\n")
+
+    # 7 — bullet lists ------------------------------------------------------
+    for li in soup.find_all("li"):
+        li_text = li.get_text(" ", strip=True)
+        li.replace_with(f"- {li_text}\n")
+
+    # 8 — paragraphs --------------------------------------------------------
+    for p in soup.find_all("p"):
+        p_text = p.get_text(" ", strip=True)
+        p.replace_with(f"{p_text}\n\n")
+
+    # 9 — <BR> to newline ---------------------------------------------------
     for br in soup.find_all("br"):
         br.replace_with("\n")
 
-    # 9 — extract, normalise whitespace ------------------------------------
-    raw = soup.get_text(separator="\n")
+    # 10 — extract, normalise whitespace -----------------------------------
+    raw = soup.get_text(separator=" ")  # use space to avoid inline \n breaks
 
     # compress internal whitespace per line, strip right‑hand side
     lines = [re.sub(r"\s+", " ", ln).rstrip() for ln in raw.splitlines()]
