@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-get_visible_text.py – Extract only the human‑visible text from any web page (no alt‑text, no <title>, no inline attributes).
+get_visible_text.py – Extract human‑visible text **with basic layout** (paragraph breaks, list bullets)
 
-Usage from the command line
----------------------------
-python get_visible_text.py https://example.com              # prints to stdout
+Changes vs. v1
+--------------
+* Keeps natural **line breaks**: every paragraph, heading, list item, and `<br>` becomes a line ending ("\n").
+* Adds basic list formatting: each `<li>` starts with "- ".
+* Still strips out all non‑visible elements and alt/title attributes.
+
+Command‑line usage
+------------------
+python get_visible_text.py https://example.com              # prints Markdown‑ish text
 python get_visible_text.py https://example.com -o page.txt  # writes to file
 
-The file also exposes a single helper function:
+The helper function
     visible_text(url: str, timeout: int = 20) -> str
-which you can import elsewhere (e.g. from Streamlit).
+returns a newline‑separated, lightly‑formatted string suitable for copy/paste.
 """
 
 from __future__ import annotations
@@ -23,41 +29,80 @@ from typing import Final
 import requests
 from bs4 import BeautifulSoup
 
-USER_AGENT: Final = "Mozilla/5.0 (compatible; CleanTextBot/1.0; +https://github.com/Mjeezuz/clean-text-extractor)"
+USER_AGENT: Final = (
+    "Mozilla/5.0 (compatible; CleanTextBot/2.0; +https://github.com/Mjeezuz/clean-text-extractor)"
+)
 
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def visible_text(url: str, timeout: int = 20) -> str:
-    """Return only the human‑visible text at *url*.
+    """Return only the human‑visible text at *url* with basic formatting.
 
-    The function:
-    * Downloads *url* using :pyfunc:`requests.get` with a desktop User‑Agent.
-    * Parses HTML via **lxml** + **BeautifulSoup4**.
-    * Removes all tags that should never be seen by users: ``<script>``, ``<style>``,
-      ``<noscript>``, ``<img>``, ``<svg>``, ``<iframe>``, ``<head>``, and ``<title>``.
-    * Collapses whitespace so the result is a single paragraph‑style block suitable for NLP.
+    The algorithm:
+    1. Fetches *url* with a desktop User‑Agent and reasonable timeout.
+    2. Parses HTML using **lxml** + **BeautifulSoup4**.
+    3. **Removes** elements never displayed: ``script``, ``style``, ``noscript``,
+       ``img``, ``svg``, ``iframe``, ``head``, ``title``.
+    4. Converts list items to Markdown‑style bullets ("- ").
+    5. Replaces ``<br>`` tags with explicit line breaks.
+    6. Extracts text with ``separator="\n"`` so every block‑level element is on
+       its own line.
+    7. Collapses internal whitespace while preserving deliberate newlines.
     """
+
+    # --- 1. download --------------------------------------------------------
     response = requests.get(url, timeout=timeout, headers={"User-Agent": USER_AGENT})
     response.raise_for_status()
 
+    # --- 2. parse -----------------------------------------------------------
     soup = BeautifulSoup(response.text, "lxml")
 
-    # drop non‑visible elements entirely
-    for tag in soup(["script", "style", "noscript", "img", "svg", "iframe", "head", "title"]):
+    # --- 3. strip non‑visible elements -------------------------------------
+    for tag in soup(
+        [
+            "script",
+            "style",
+            "noscript",
+            "img",
+            "svg",
+            "iframe",
+            "head",
+            "title",
+        ]
+    ):
         tag.decompose()
 
-    # gather remaining text fragments, strip whitespace, and join
-    text = " ".join(fragment.strip() for fragment in soup.stripped_strings)
-    # normalise internal whitespace to single spaces
-    return re.sub(r"\s+", " ", text).strip()
+    # --- 4. bullet lists ----------------------------------------------------
+    for li in soup.find_all("li"):
+        text_li = li.get_text(" ", strip=True)
+        li.clear()
+        li.append(f"- {text_li}")
+
+    # --- 5. explicit <br> handling -----------------------------------------
+    for br in soup.find_all("br"):
+        br.replace_with("\n")
+
+    # --- 6. gather text with line breaks -----------------------------------
+    raw_text = soup.get_text(separator="\n")
+
+    # --- 7. normalise -------------------------------------------------------
+    #   * collapse runs of whitespace within lines
+    #   * drop empty lines
+    lines = [re.sub(r"\s+", " ", line).strip() for line in raw_text.splitlines()]
+    cleaned_lines = [ln for ln in lines if ln]
+
+    return "\n".join(cleaned_lines)
 
 
 # ---------------------------------------------------------------------------
 # Command‑line interface
 # ---------------------------------------------------------------------------
 
-
-def _cli() -> None:  # pragma: no cover  (simple CLI wrapper, not unit‑tested)
-    parser = argparse.ArgumentParser(description="Extract visible text from a web page.")
+def _cli() -> None:  # pragma: no cover (simple CLI wrapper)
+    parser = argparse.ArgumentParser(description="Extract visible text from a web page (with line breaks).")
     parser.add_argument("url", help="Web page URL to fetch")
     parser.add_argument("-o", "--output", metavar="FILE", help="Write result to FILE instead of stdout")
     parser.add_argument("-t", "--timeout", type=int, default=20, help="HTTP timeout in seconds (default: 20)")
