@@ -2,15 +2,18 @@
 """
 get_visible_text.py – Extract human‑visible text **with rich structural cues for LLMs**
 
-v6 – 2025‑06‑11
+v7 – 2025‑06‑11
 ---------------
-* **Fix:** inline `<strong>/<b>` no longer force unwanted line breaks (we switched to space‑separator extraction and add our own block breaks).
-* Headings (h1‑h4) still bold‑tagged as `**[Hn] ...**` with blank lines before **and** after.
-* Drops `<header>` and `<footer>` globally, plus usual non‑visible tags.
-* Scope is `<main>` if present, otherwise full `<body>`.
-* Bullets stay single‑spaced; links keep the `#anchor` cue.
+* **New header block** (always at top):
+  ```
+  #URL_PATH: /path/to/page
+  #TITLE:     Example Domain
+  #META_DESC: Example Domain is for use in illustrative…
+  ```
+  – makes it trivial for downstream GPT pipelines to know the source context.
+* Keeps v6 features: bold tagged headings (`**[H2] …**`), double‑blank lines around headings, single‑spaced bullets, link anchors prefixed with `#`, removal of `<header>` and `<footer>`, scope within `<main>` when present, no stray line breaks on inline `<b>/<strong>`.
 
-CLI usage unchanged; `visible_text()` is the public API.
+CLI usage unchanged; `visible_text()` remains the public API.
 """
 
 from __future__ import annotations
@@ -19,30 +22,48 @@ import argparse
 import pathlib
 import re
 import sys
-from typing import Final
+from typing import Final, Iterable
+from urllib.parse import urlparse, unquote
 
 import requests
 from bs4 import BeautifulSoup
 
 USER_AGENT: Final = (
-    "Mozilla/5.0 (compatible; CleanTextBot/6.0; +https://github.com/Mjeezuz/clean-text-extractor)"
+    "Mozilla/5.0 (compatible; CleanTextBot/7.0; +https://github.com/Mjeezuz/clean-text-extractor)"
 )
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+def _first_meta_content(soup: BeautifulSoup, names: Iterable[str]) -> str:
+    """Return the first <meta name="..." content="..."> that matches *names*."""
+    for nm in names:
+        tag = soup.find("meta", attrs={"name": nm})
+        if tag and (content := tag.get("content")):
+            return content.strip()
+    return ""
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 def visible_text(url: str, timeout: int = 20) -> str:
-    """Return only the human‑visible text at *url* with layout cues for LLMs."""
+    """Return only the human‑visible text at *url* with layout cues and a header."""
 
     # 1 — fetch -------------------------------------------------------------
     resp = requests.get(url, timeout=timeout, headers={"User-Agent": USER_AGENT})
     resp.raise_for_status()
 
-    # 2 — parse -------------------------------------------------------------
+    # 2 — parse full document ----------------------------------------------
     soup_full = BeautifulSoup(resp.text, "lxml")
 
-    # 3 — isolate <main> or <body> -----------------------------------------
+    # 3a — collect meta data ----------------------------------------------
+    title_txt = soup_full.title.string.strip() if soup_full.title and soup_full.title.string else ""
+    meta_desc = _first_meta_content(soup_full, ("description", "og:description"))
+    path_id = unquote(urlparse(url).path or "/")
+
+    # 3b — isolate <main> or <body> ----------------------------------------
     main = soup_full.find("main") or soup_full.body or soup_full
     soup = BeautifulSoup(str(main), "lxml")  # operate on a copy
 
@@ -91,13 +112,19 @@ def visible_text(url: str, timeout: int = 20) -> str:
     # 10 — extract, normalise whitespace -----------------------------------
     raw = soup.get_text(separator=" ")  # use space to avoid inline \n breaks
 
-    # compress internal whitespace per line, strip right‑hand side
     lines = [re.sub(r"\s+", " ", ln).rstrip() for ln in raw.splitlines()]
     joined = "\n".join(ln for ln in lines)
-
-    # collapse ≥3 consecutive blank lines to exactly 2
     cleaned = re.sub(r"\n{3,}", "\n\n", joined).strip()
-    return cleaned
+
+    # 11 — prepend header ---------------------------------------------------
+    header_parts = [f"#URL_PATH: {path_id}"]
+    if title_txt:
+        header_parts.append(f"#TITLE: {title_txt}")
+    if meta_desc:
+        header_parts.append(f"#META_DESC: {meta_desc}")
+    header = "\n".join(header_parts)
+
+    return f"{header}\n\n{cleaned}"
 
 # ---------------------------------------------------------------------------
 # CLI helper
