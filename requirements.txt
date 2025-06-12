@@ -2,3 +2,5 @@ requests
 beautifulsoup4
 lxml
 streamlit
+openai>=1.14      # or deepl-sdk, or libretranslate-py
+streamlit
