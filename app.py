@@ -1,5 +1,11 @@
+#app.py
+from pathlib import Path
 import os, openai, streamlit as st
 from get_visible_text import visible_text
+
+# ---------- load rules ----------
+RULES_PATH = Path(__file__).with_name("translator_rules.txt")
+TRANSLATOR_SYSTEM_PROMPT = RULES_PATH.read_text(encoding="utf-8")
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
@@ -34,19 +40,15 @@ with tab_translate:
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Build the OpenAI conversation
-        system_msg = (
-            "You are a helpful translation bot. "
-            f"Translate the provided text to {tgt_lang}. "
-            "Keep line breaks, return plain text."
-        )
-        messages = [{"role": "system", "content": system_msg},
-                    {"role": "user", "content": src_text}]
+        # -------- build conversation w/ rules --------
+        messages = [
+            {"role": "system", "content": TRANSLATOR_SYSTEM_PROMPT},
+            {"role": "user", "content": f"TARGET_LANG = {tgt_lang}\n\n{src_text}"},
+        ]
 
-        # Call the model
         try:
             resp = openai.chat.completions.create(
-                model="gpt-4o-mini",  # economical
+                model="gpt-4o-mini",
                 messages=messages,
                 max_tokens=2000,
                 temperature=0.2,
